@@ -1,6 +1,6 @@
 {
-    "name": "flash_sheets",
-    "short_name": "flash_sheets",
+    "name": "Flashcard Sheets",
+    "short_name": "Flashcard Sheets",
     "start_url": ".",
     "display": "standalone",
     "background_color": "#0175C2",

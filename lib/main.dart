@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:math';
 
 import 'package:csv/csv.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:http/http.dart' as http;
@@ -16,14 +17,14 @@ class FlashSheetsApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    const background = Color(0xFFF5F7FC);
-    const navy = Color(0xFF1B2A41);
-    const cyan = Color(0xFF00A4E4);
+    const background = Color(0xFFEAF1FF);
+    const navy = Color(0xFF0E2A5A);
+    const cyan = Color(0xFF1D9BF0);
     const coral = Color(0xFFF25F5C);
 
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      title: 'Flash Sheets',
+      title: 'Flashcard Sheets',
       theme: ThemeData(
         useMaterial3: true,
         colorScheme: ColorScheme.fromSeed(
@@ -32,6 +33,11 @@ class FlashSheetsApp extends StatelessWidget {
           secondary: cyan,
           error: coral,
           surface: Colors.white,
+        ),
+        appBarTheme: const AppBarTheme(
+          backgroundColor: navy,
+          foregroundColor: Colors.white,
+          surfaceTintColor: Colors.transparent,
         ),
         scaffoldBackgroundColor: background,
       ),
@@ -52,6 +58,11 @@ class _FlashDeckPageState extends State<FlashDeckPage> {
   static const _activeDeckIndexKey = 'active_deck_index_v1';
   static const _reverseCardsKey = 'reverse_cards_v1';
   static const _reviewMissedOnlyKey = 'review_missed_only_v1';
+  static const _languageCodeKey = 'language_code_v1';
+  static const _androidServerClientId = String.fromEnvironment(
+    'GOOGLE_SERVER_CLIENT_ID',
+    defaultValue: '',
+  );
 
   final _linkController = TextEditingController();
   final _loader = SheetDeckLoader();
@@ -60,10 +71,9 @@ class _FlashDeckPageState extends State<FlashDeckPage> {
 
   List<InstalledDeck> _installedDecks = [];
   int? _activeDeckIndex;
-  bool _showSourcePanel = false;
   bool _reverseCards = false;
   bool _reviewMissedOnly = false;
-  bool _showOptionsPanel = false;
+  AppLanguage _language = AppLanguage.english;
 
   GoogleSignInAccount? _account;
   bool _loading = false;
@@ -73,6 +83,12 @@ class _FlashDeckPageState extends State<FlashDeckPage> {
   int _right = 0;
   int _wrong = 0;
   bool _showAnswer = false;
+
+  AppStrings get _strings => AppStrings(_language);
+  bool get _isAndroid =>
+      !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
+  bool get _hasAndroidServerClientId =>
+      _androidServerClientId.trim().isNotEmpty;
 
   @override
   void initState() {
@@ -88,6 +104,8 @@ class _FlashDeckPageState extends State<FlashDeckPage> {
       final rawActiveIndex = prefs.getInt(_activeDeckIndexKey);
       final reverse = prefs.getBool(_reverseCardsKey) ?? false;
       final reviewMissedOnly = prefs.getBool(_reviewMissedOnlyKey) ?? false;
+      final languageCode =
+          prefs.getString(_languageCodeKey) ?? AppLanguage.english.code;
 
       final installed = <InstalledDeck>[];
       if (rawDecks != null && rawDecks.isNotEmpty) {
@@ -118,7 +136,7 @@ class _FlashDeckPageState extends State<FlashDeckPage> {
         _activeDeckIndex = activeIndex;
         _reverseCards = reverse;
         _reviewMissedOnly = reviewMissedOnly;
-        _showSourcePanel = false;
+        _language = appLanguageFromCode(languageCode);
       });
       _persistState();
     } catch (_) {
@@ -139,11 +157,16 @@ class _FlashDeckPageState extends State<FlashDeckPage> {
     }
     await prefs.setBool(_reverseCardsKey, _reverseCards);
     await prefs.setBool(_reviewMissedOnlyKey, _reviewMissedOnly);
+    await prefs.setString(_languageCodeKey, _language.code);
   }
 
   Future<void> _initializeGoogleSignIn() async {
     try {
-      await _googleSignIn.initialize();
+      if (_isAndroid && _hasAndroidServerClientId) {
+        await _googleSignIn.initialize(serverClientId: _androidServerClientId);
+      } else {
+        await _googleSignIn.initialize();
+      }
 
       _googleSignIn.authenticationEvents.listen((
         GoogleSignInAuthenticationEvent event,
@@ -156,13 +179,15 @@ class _FlashDeckPageState extends State<FlashDeckPage> {
         });
       });
 
-      final restoreAttempt = _googleSignIn.attemptLightweightAuthentication();
-      if (restoreAttempt != null) {
-        final user = await restoreAttempt;
-        if (mounted) {
-          setState(() {
-            _account = user;
-          });
+      if (!(_isAndroid && !_hasAndroidServerClientId)) {
+        final restoreAttempt = _googleSignIn.attemptLightweightAuthentication();
+        if (restoreAttempt != null) {
+          final user = await restoreAttempt;
+          if (mounted) {
+            setState(() {
+              _account = user;
+            });
+          }
         }
       }
     } catch (_) {
@@ -177,10 +202,11 @@ class _FlashDeckPageState extends State<FlashDeckPage> {
   }
 
   Future<void> _loadPublicSheet() async {
+    final s = _strings;
     final input = _linkController.text.trim();
     if (input.isEmpty) {
       setState(() {
-        _error = 'Paste a Google Sheets share link first.';
+        _error = s.pasteLinkFirst;
       });
       return;
     }
@@ -192,10 +218,11 @@ class _FlashDeckPageState extends State<FlashDeckPage> {
   }
 
   Future<void> _loadPrivateSheet() async {
+    final s = _strings;
     final input = _linkController.text.trim();
     if (input.isEmpty) {
       setState(() {
-        _error = 'Paste a Google Sheets share link first.';
+        _error = s.pasteLinkFirst;
       });
       return;
     }
@@ -233,15 +260,16 @@ class _FlashDeckPageState extends State<FlashDeckPage> {
   }
 
   String _deckNameFromInput(String input) {
+    final s = _strings;
     try {
       final source = SpreadsheetSource.parse(input);
-      return 'Sheet ${source.spreadsheetId.substring(0, 8)}';
+      return '${s.sheet} ${source.spreadsheetId.substring(0, 8)}';
     } catch (_) {
-      return 'Sheet';
+      return s.sheet;
     }
   }
 
-  Map<String, int> _retainMissedCounts(
+  Map<String, int> _retainCountsForCurrentCards(
     Map<String, int> existing,
     List<FlashCard> cards,
   ) {
@@ -262,6 +290,7 @@ class _FlashDeckPageState extends State<FlashDeckPage> {
     required String input,
     required Future<List<FlashCard>> Function() action,
   }) async {
+    final s = _strings;
     setState(() {
       _loading = true;
       _error = null;
@@ -271,8 +300,7 @@ class _FlashDeckPageState extends State<FlashDeckPage> {
       final loaded = await action();
       if (loaded.isEmpty) {
         setState(() {
-          _error =
-              'No flash cards found. Ensure columns A and B contain question and answer.';
+          _error = s.noCardsFound;
           _loading = false;
         });
         return;
@@ -290,8 +318,14 @@ class _FlashDeckPageState extends State<FlashDeckPage> {
           cards: _shuffleCards(loaded),
           missedCounts: existingIndex == -1
               ? const {}
-              : _retainMissedCounts(
+              : _retainCountsForCurrentCards(
                   updated[existingIndex].missedCounts,
+                  loaded,
+                ),
+          correctCounts: existingIndex == -1
+              ? const {}
+              : _retainCountsForCurrentCards(
+                  updated[existingIndex].correctCounts,
                   loaded,
                 ),
         );
@@ -307,7 +341,6 @@ class _FlashDeckPageState extends State<FlashDeckPage> {
         _right = 0;
         _wrong = 0;
         _showAnswer = false;
-        _showSourcePanel = false;
         _loading = false;
       });
       await _persistState();
@@ -323,7 +356,14 @@ class _FlashDeckPageState extends State<FlashDeckPage> {
       _activeCards.isNotEmpty && _index >= _activeCards.length;
 
   Future<void> _loadAuthorizedSheet(String input) async {
+    final s = _strings;
     try {
+      if (_isAndroid && !_hasAndroidServerClientId) {
+        setState(() {
+          _error = s.androidServerClientIdMissing;
+        });
+        return;
+      }
       final account = _account ?? await _googleSignIn.authenticate();
       final authHeaders = await account.authorizationClient
           .authorizationHeaders(const [
@@ -332,7 +372,7 @@ class _FlashDeckPageState extends State<FlashDeckPage> {
 
       if (authHeaders == null) {
         setState(() {
-          _error = 'Unable to get Google auth headers. Check OAuth setup.';
+          _error = s.oauthHeadersFailed;
         });
         return;
       }
@@ -344,16 +384,17 @@ class _FlashDeckPageState extends State<FlashDeckPage> {
       );
     } catch (e) {
       setState(() {
-        _error = 'Google sign-in failed: $e';
+        _error = '${s.googleSignInFailed}: $e';
       });
     }
   }
 
   Future<void> _refreshSheet() async {
+    final s = _strings;
     final deck = _activeDeck;
     if (deck == null) {
       setState(() {
-        _error = 'Load a sheet first before refreshing.';
+        _error = s.loadSheetBeforeRefresh;
       });
       return;
     }
@@ -377,6 +418,7 @@ class _FlashDeckPageState extends State<FlashDeckPage> {
     setState(() {
       if (isCorrect) {
         _right++;
+        _incrementCorrectForActiveDeck(card);
         _decrementMissedForActiveDeck(card);
       } else {
         _wrong++;
@@ -414,6 +456,18 @@ class _FlashDeckPageState extends State<FlashDeckPage> {
     nextCounts[key] = (nextCounts[key] ?? 0) + 1;
     final updated = [..._installedDecks];
     updated[index] = current.copyWith(missedCounts: nextCounts);
+    _installedDecks = updated;
+  }
+
+  void _incrementCorrectForActiveDeck(FlashCard card) {
+    final index = _activeDeckIndex;
+    if (index == null || index < 0 || index >= _installedDecks.length) return;
+    final current = _installedDecks[index];
+    final key = current.cardKey(card);
+    final nextCounts = <String, int>{...current.correctCounts};
+    nextCounts[key] = (nextCounts[key] ?? 0) + 1;
+    final updated = [..._installedDecks];
+    updated[index] = current.copyWith(correctCounts: nextCounts);
     _installedDecks = updated;
   }
 
@@ -510,267 +564,416 @@ class _FlashDeckPageState extends State<FlashDeckPage> {
       _wrong = 0;
       _showAnswer = false;
       _error = null;
-      _showSourcePanel = updated.isEmpty;
     });
     _persistState();
   }
 
-  void _onCardSwipedRight() {
-    if (_loading || _activeCards.isEmpty || _sessionDone) return;
-    if (_showAnswer) return;
-    setState(() {
-      _showAnswer = true;
-    });
+  Future<void> _openSourcePage() async {
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (pageContext) {
+          return StatefulBuilder(
+            builder: (pageContext, pageSetState) {
+              final s = _strings;
+              return Scaffold(
+                appBar: AppBar(title: Text(s.googleSheetSource)),
+                body: SafeArea(
+                  child: Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Column(
+                      children: [
+                        if (_installedDecks.isNotEmpty) ...[
+                          Row(
+                            children: [
+                              Text(
+                                s.installedSets,
+                                style: Theme.of(context).textTheme.titleSmall,
+                              ),
+                              const Spacer(),
+                              IconButton(
+                                onPressed: _activeDeckIndex == null
+                                    ? null
+                                    : () {
+                                        _deleteActiveDeck();
+                                        pageSetState(() {});
+                                      },
+                                icon: const Icon(Icons.delete_outline_rounded),
+                                iconSize: 26,
+                                tooltip: s.deleteSelectedSet,
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 8),
+                          SizedBox(
+                            height: 42,
+                            child: ListView.separated(
+                              scrollDirection: Axis.horizontal,
+                              itemCount: _installedDecks.length,
+                              separatorBuilder: (_, _) =>
+                                  const SizedBox(width: 8),
+                              itemBuilder: (_, i) => ChoiceChip(
+                                label: Text(_installedDecks[i].name),
+                                selected: _activeDeckIndex == i,
+                                onSelected: (_) {
+                                  _switchDeck(i);
+                                  Navigator.of(pageContext).pop();
+                                },
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 16),
+                        ],
+                        _SourcePanel(
+                          strings: s,
+                          controller: _linkController,
+                          loading: _loading,
+                          signedInEmail: _account?.email,
+                          onLoadPublic: () async {
+                            await _loadPublicSheet();
+                            pageSetState(() {});
+                          },
+                          onLoadPrivate: () async {
+                            await _loadPrivateSheet();
+                            pageSetState(() {});
+                          },
+                          canClose: false,
+                          onClose: () {},
+                        ),
+                        if (_error != null) ...[
+                          const SizedBox(height: 12),
+                          Text(
+                            _error!,
+                            style: TextStyle(
+                              color: Theme.of(context).colorScheme.error,
+                            ),
+                          ),
+                        ],
+                        if (_installedDecks.isNotEmpty) ...[
+                          const SizedBox(height: 14),
+                          SizedBox(
+                            width: double.infinity,
+                            child: FilledButton.icon(
+                              onPressed: () => Navigator.of(pageContext).pop(),
+                              icon: const Icon(Icons.play_arrow_rounded),
+                              label: Text(s.startStudying),
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                ),
+              );
+            },
+          );
+        },
+      ),
+    );
   }
 
-  void _onCardSwipedDown() {
-    if (_loading || _activeCards.isEmpty || _sessionDone) return;
-    _markCard(true);
+  Future<void> _openPreferencesPage() async {
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (pageContext) {
+          return StatefulBuilder(
+            builder: (pageContext, pageSetState) {
+              final s = _strings;
+              return Scaffold(
+                appBar: AppBar(title: Text(s.options)),
+                body: SafeArea(
+                  child: SingleChildScrollView(
+                    padding: const EdgeInsets.all(16),
+                    child: Container(
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFF4F8FF),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: const Color(0xFFB7C8E8)),
+                      ),
+                      child: Column(
+                        children: [
+                          Wrap(
+                            spacing: 8,
+                            runSpacing: 8,
+                            children: [
+                              SizedBox(
+                                width: 165,
+                                child: OutlinedButton.icon(
+                                  onPressed: _loading ? null : _refreshSheet,
+                                  icon: const Icon(
+                                    Icons.refresh_rounded,
+                                    size: 24,
+                                  ),
+                                  style: OutlinedButton.styleFrom(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 14,
+                                      vertical: 13,
+                                    ),
+                                  ),
+                                  label: Text(
+                                    s.refresh,
+                                    style: const TextStyle(
+                                      height: 1.0,
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                              SizedBox(
+                                width: 165,
+                                child: OutlinedButton.icon(
+                                  onPressed: _activeCards.isEmpty
+                                      ? null
+                                      : _randomizeActiveDeck,
+                                  icon: const Icon(
+                                    Icons.shuffle_rounded,
+                                    size: 24,
+                                  ),
+                                  style: OutlinedButton.styleFrom(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 14,
+                                      vertical: 13,
+                                    ),
+                                  ),
+                                  label: Text(
+                                    s.randomize,
+                                    style: const TextStyle(
+                                      height: 1.0,
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                              SizedBox(
+                                width: 165,
+                                child: OutlinedButton.icon(
+                                  onPressed: _activeCards.isEmpty
+                                      ? null
+                                      : _resetStats,
+                                  icon: const Icon(
+                                    Icons.restart_alt_rounded,
+                                    size: 24,
+                                  ),
+                                  style: OutlinedButton.styleFrom(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 14,
+                                      vertical: 13,
+                                    ),
+                                  ),
+                                  label: Text(
+                                    s.resetStats,
+                                    style: const TextStyle(
+                                      height: 1.0,
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 8),
+                          Row(
+                            children: [
+                              const Icon(
+                                Icons.report_problem_outlined,
+                                size: 18,
+                              ),
+                              const SizedBox(width: 8),
+                              Text(
+                                '${s.reviewMissedOnly} ($_activeMissedCount)',
+                              ),
+                              const Spacer(),
+                              Switch(
+                                value: _reviewMissedOnly,
+                                onChanged: (value) {
+                                  setState(() {
+                                    _reviewMissedOnly = value;
+                                    _index = 0;
+                                    _showAnswer = false;
+                                  });
+                                  pageSetState(() {});
+                                  _persistState();
+                                },
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 8),
+                          DropdownButtonFormField<AppLanguage>(
+                            initialValue: _language,
+                            decoration: InputDecoration(
+                              labelText: s.languageLabel,
+                              prefixIcon: const Icon(Icons.language_rounded),
+                              border: const OutlineInputBorder(),
+                              isDense: true,
+                              contentPadding: const EdgeInsets.symmetric(
+                                horizontal: 10,
+                                vertical: 10,
+                              ),
+                            ),
+                            items: [
+                              DropdownMenuItem(
+                                value: AppLanguage.english,
+                                child: Text(s.english),
+                              ),
+                              DropdownMenuItem(
+                                value: AppLanguage.spanish,
+                                child: Text(s.spanish),
+                              ),
+                            ],
+                            onChanged: (value) {
+                              if (value == null) return;
+                              setState(() {
+                                _language = value;
+                              });
+                              pageSetState(() {});
+                              _persistState();
+                            },
+                          ),
+                          Row(
+                            children: [
+                              const Icon(Icons.swap_horiz_rounded, size: 18),
+                              const SizedBox(width: 8),
+                              Text(s.reverseCards),
+                              const Spacer(),
+                              Switch(
+                                value: _reverseCards,
+                                onChanged: (value) {
+                                  setState(() {
+                                    _reverseCards = value;
+                                    _showAnswer = false;
+                                  });
+                                  pageSetState(() {});
+                                  _persistState();
+                                },
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 8),
+                          SizedBox(
+                            width: double.infinity,
+                            child: OutlinedButton.icon(
+                              onPressed:
+                                  _activeDeck == null || _activeMissedCount == 0
+                                  ? null
+                                  : () {
+                                      _clearMissedForActiveDeck();
+                                      pageSetState(() {});
+                                    },
+                              icon: const Icon(Icons.delete_sweep_rounded),
+                              label: Text(s.clearMissedRecords),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              );
+            },
+          );
+        },
+      ),
+    );
   }
 
-  void _onCardSwipedLeft() {
-    if (_loading || _activeCards.isEmpty || _sessionDone) return;
-    _markCard(false);
+  Widget _buildStudyMode(AppStrings s) {
+    return Column(
+      children: [
+        if (_error != null) ...[
+          const SizedBox(height: 12),
+          Text(
+            _error!,
+            style: TextStyle(color: Theme.of(context).colorScheme.error),
+          ),
+        ],
+        if (_activeCards.isNotEmpty && (_right + _wrong) > 0)
+          Row(
+            children: [
+              _StatChip(
+                label: s.right,
+                value: _right,
+                color: const Color(0xFF2A9D8F),
+              ),
+              const SizedBox(width: 8),
+              _StatChip(
+                label: s.wrong,
+                value: _wrong,
+                color: const Color(0xFFE76F51),
+              ),
+              const Spacer(),
+            ],
+          ),
+        const SizedBox(height: 16),
+        Expanded(child: Center(child: _buildCardArea())),
+        if (_activeCards.isNotEmpty) ...[
+          const SizedBox(height: 12),
+          _AnswerActions(
+            strings: s,
+            enabled: !_sessionDone,
+            onReveal: () {
+              setState(() {
+                _showAnswer = !_showAnswer;
+              });
+            },
+            showAnswer: _showAnswer,
+            onWrong: () => _markCard(false),
+            onRight: () => _markCard(true),
+          ),
+        ],
+      ],
+    );
   }
 
   @override
   Widget build(BuildContext context) {
+    final s = _strings;
     return Scaffold(
       appBar: AppBar(
         centerTitle: true,
-        title: const Text('Flash Sheets'),
+        title: Text(s.appTitle),
         actions: [
           IconButton(
-            onPressed: () {
-              Navigator.of(context).push(
-                MaterialPageRoute<void>(builder: (_) => const AboutPage()),
-              );
-            },
-            icon: const Icon(Icons.info_outline_rounded),
-            tooltip: 'About',
+            onPressed: _openSourcePage,
+            icon: const Icon(Icons.folder_open_outlined),
+            iconSize: 26,
+            tooltip: s.googleSheetSource,
           ),
           IconButton(
             onPressed: () {
-              setState(() {
-                _showOptionsPanel = !_showOptionsPanel;
-              });
+              Navigator.of(context).push(
+                MaterialPageRoute<void>(builder: (_) => AboutPage(strings: s)),
+              );
             },
-            icon: Icon(
-              _showOptionsPanel ? Icons.tune_rounded : Icons.tune_outlined,
-            ),
-            tooltip: 'Options',
+            icon: const Icon(Icons.info_outline_rounded),
+            iconSize: 26,
+            tooltip: s.about,
+          ),
+          IconButton(
+            onPressed: _openPreferencesPage,
+            icon: const Icon(Icons.tune_outlined),
+            iconSize: 26,
+            tooltip: s.options,
           ),
           if (_account != null)
             IconButton(
               onPressed: _googleSignIn.signOut,
               icon: const Icon(Icons.logout_rounded),
-              tooltip: 'Sign out',
+              iconSize: 26,
+              tooltip: s.signOut,
             ),
         ],
       ),
       body: SafeArea(
         child: Padding(
           padding: const EdgeInsets.all(16),
-          child: Column(
-            children: [
-              if (_showSourcePanel || _installedDecks.isEmpty) ...[
-                _SourcePanel(
-                  controller: _linkController,
-                  loading: _loading,
-                  signedInEmail: _account?.email,
-                  onLoadPublic: _loadPublicSheet,
-                  onLoadPrivate: _loadPrivateSheet,
-                  canClose: _installedDecks.isNotEmpty,
-                  onClose: () {
-                    setState(() {
-                      _showSourcePanel = false;
-                    });
-                  },
-                ),
-                const SizedBox(height: 16),
-              ],
-              if (_installedDecks.isNotEmpty) ...[
-                Row(
-                  children: [
-                    Text(
-                      'Installed sets',
-                      style: Theme.of(context).textTheme.titleSmall,
-                    ),
-                    const Spacer(),
-                    IconButton(
-                      onPressed: () {
-                        setState(() {
-                          _showSourcePanel = true;
-                        });
-                      },
-                      icon: const Icon(Icons.add_rounded),
-                      tooltip: 'Add new set',
-                    ),
-                    IconButton(
-                      onPressed: _activeDeckIndex == null
-                          ? null
-                          : _deleteActiveDeck,
-                      icon: const Icon(Icons.delete_outline_rounded),
-                      tooltip: 'Delete selected set',
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 8),
-                SizedBox(
-                  height: 42,
-                  child: ListView.separated(
-                    scrollDirection: Axis.horizontal,
-                    itemCount: _installedDecks.length,
-                    separatorBuilder: (_, _) => const SizedBox(width: 8),
-                    itemBuilder: (_, i) => ChoiceChip(
-                      label: Text(_installedDecks[i].name),
-                      selected: _activeDeckIndex == i,
-                      onSelected: (_) => _switchDeck(i),
-                    ),
-                  ),
-                ),
-              ],
-              if (_error != null) ...[
-                const SizedBox(height: 12),
-                Text(
-                  _error!,
-                  style: TextStyle(color: Theme.of(context).colorScheme.error),
-                ),
-              ],
-              Row(
-                children: [
-                  _StatChip(
-                    label: 'Right',
-                    value: _right,
-                    color: const Color(0xFF2A9D8F),
-                  ),
-                  const SizedBox(width: 8),
-                  _StatChip(
-                    label: 'Wrong',
-                    value: _wrong,
-                    color: const Color(0xFFE76F51),
-                  ),
-                  const Spacer(),
-                ],
-              ),
-              if (_showOptionsPanel) ...[
-                const SizedBox(height: 10),
-                Container(
-                  padding: const EdgeInsets.all(10),
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: Colors.black12),
-                  ),
-                  child: Column(
-                    children: [
-                      Row(
-                        children: [
-                          Expanded(
-                            child: OutlinedButton.icon(
-                              onPressed: _loading ? null : _refreshSheet,
-                              icon: const Icon(Icons.refresh_rounded),
-                              label: const Text('Refresh'),
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: OutlinedButton.icon(
-                              onPressed: _activeCards.isEmpty
-                                  ? null
-                                  : _randomizeActiveDeck,
-                              icon: const Icon(Icons.shuffle_rounded),
-                              label: const Text('Randomize'),
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: OutlinedButton.icon(
-                              onPressed: _activeCards.isEmpty
-                                  ? null
-                                  : _resetStats,
-                              icon: const Icon(Icons.restart_alt_rounded),
-                              label: const Text('Reset stats'),
-                            ),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 8),
-                      Row(
-                        children: [
-                          const Icon(Icons.report_problem_outlined, size: 18),
-                          const SizedBox(width: 8),
-                          Text('Review missed only ($_activeMissedCount)'),
-                          const Spacer(),
-                          Switch(
-                            value: _reviewMissedOnly,
-                            onChanged: (value) {
-                              setState(() {
-                                _reviewMissedOnly = value;
-                                _index = 0;
-                                _showAnswer = false;
-                              });
-                              _persistState();
-                            },
-                          ),
-                        ],
-                      ),
-                      Row(
-                        children: [
-                          const Icon(Icons.swap_horiz_rounded, size: 18),
-                          const SizedBox(width: 8),
-                          const Text('Reverse cards'),
-                          const Spacer(),
-                          Switch(
-                            value: _reverseCards,
-                            onChanged: (value) {
-                              setState(() {
-                                _reverseCards = value;
-                                _showAnswer = false;
-                              });
-                              _persistState();
-                            },
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 8),
-                      SizedBox(
-                        width: double.infinity,
-                        child: OutlinedButton.icon(
-                          onPressed:
-                              _activeDeck == null || _activeMissedCount == 0
-                              ? null
-                              : _clearMissedForActiveDeck,
-                          icon: const Icon(Icons.delete_sweep_rounded),
-                          label: const Text('Clear missed records'),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-              const SizedBox(height: 16),
-              Expanded(child: Center(child: _buildCardArea())),
-              const SizedBox(height: 12),
-              _AnswerActions(
-                enabled: _activeCards.isNotEmpty && !_sessionDone,
-                onReveal: () {
-                  setState(() {
-                    _showAnswer = !_showAnswer;
-                  });
-                },
-                showAnswer: _showAnswer,
-                onWrong: () => _markCard(false),
-                onRight: () => _markCard(true),
-              ),
-            ],
-          ),
+          child: _buildStudyMode(s),
         ),
       ),
     );
   }
 
   Widget _buildCardArea() {
+    final s = _strings;
     if (_loading) {
       return const CircularProgressIndicator();
     }
@@ -778,8 +981,8 @@ class _FlashDeckPageState extends State<FlashDeckPage> {
     if (_activeDeck != null && _activeCards.isEmpty && _reviewMissedOnly) {
       return _InfoCard(
         icon: Icons.check_circle_outline_rounded,
-        title: 'No missed cards',
-        body: 'You are caught up. Turn off "Review missed only" to study all.',
+        title: s.noMissedCards,
+        body: s.noMissedCardsBody,
         action: FilledButton(
           onPressed: () {
             setState(() {
@@ -787,7 +990,7 @@ class _FlashDeckPageState extends State<FlashDeckPage> {
             });
             _persistState();
           },
-          child: const Text('Study all cards'),
+          child: Text(s.studyAllCards),
         ),
       );
     }
@@ -795,21 +998,20 @@ class _FlashDeckPageState extends State<FlashDeckPage> {
     if (_activeCards.isEmpty) {
       return _InfoCard(
         icon: Icons.table_chart_rounded,
-        title: 'Load Your Sheet',
-        body:
-            'Use a Google Sheets share link with two columns:\nA = question, B = answer.\n\nYou can install multiple sets and switch between them.',
+        title: s.loadYourSheet,
+        body: s.loadYourSheetBody,
       );
     }
 
     if (_sessionDone) {
       return _InfoCard(
         icon: Icons.emoji_events_rounded,
-        title: 'Session complete',
-        body: 'Right: $_right\nWrong: $_wrong',
+        title: s.sessionComplete,
+        body: '${s.right}: $_right\n${s.wrong}: $_wrong',
         action: FilledButton.icon(
           onPressed: _restartSession,
           icon: const Icon(Icons.refresh_rounded),
-          label: const Text('Restart session'),
+          label: Text(s.restartSession),
         ),
       );
     }
@@ -819,45 +1021,29 @@ class _FlashDeckPageState extends State<FlashDeckPage> {
     final backText = _reverseCards ? card.question : card.answer;
     final displayText = _showAnswer ? backText : frontText;
     final label = _showAnswer
-        ? (_reverseCards ? 'Question' : 'Answer')
-        : (_reverseCards ? 'Answer' : 'Question');
+        ? (_reverseCards ? s.question : s.answer)
+        : (_reverseCards ? s.answer : s.question);
 
-    return GestureDetector(
-      onHorizontalDragEnd: (details) {
-        final velocity = details.primaryVelocity ?? 0;
-        if (velocity > 320) {
-          _onCardSwipedRight();
-        } else if (velocity < -320) {
-          _onCardSwipedLeft();
-        }
-      },
-      onVerticalDragEnd: (details) {
-        final velocity = details.primaryVelocity ?? 0;
-        if (velocity > 320) {
-          _onCardSwipedDown();
-        }
-      },
-      child: AnimatedSwitcher(
-        duration: const Duration(milliseconds: 320),
-        transitionBuilder: (child, animation) {
-          final offsetAnimation =
-              Tween<Offset>(
-                begin: const Offset(0.08, 0),
-                end: Offset.zero,
-              ).animate(
-                CurvedAnimation(parent: animation, curve: Curves.easeOutCubic),
-              );
+    return AnimatedSwitcher(
+      duration: const Duration(milliseconds: 320),
+      transitionBuilder: (child, animation) {
+        final offsetAnimation =
+            Tween<Offset>(
+              begin: const Offset(0.08, 0),
+              end: Offset.zero,
+            ).animate(
+              CurvedAnimation(parent: animation, curve: Curves.easeOutCubic),
+            );
 
-          return FadeTransition(
-            opacity: animation,
-            child: SlideTransition(position: offsetAnimation, child: child),
-          );
-        },
-        child: _FlashCardView(
-          key: ValueKey('$_index-$_showAnswer'),
-          label: label,
-          text: displayText,
-        ),
+        return FadeTransition(
+          opacity: animation,
+          child: SlideTransition(position: offsetAnimation, child: child),
+        );
+      },
+      child: _FlashCardView(
+        key: ValueKey('$_index-$_showAnswer'),
+        label: label,
+        text: displayText,
       ),
     );
   }
@@ -865,6 +1051,7 @@ class _FlashDeckPageState extends State<FlashDeckPage> {
 
 class _SourcePanel extends StatelessWidget {
   const _SourcePanel({
+    required this.strings,
     required this.controller,
     required this.loading,
     required this.signedInEmail,
@@ -874,6 +1061,7 @@ class _SourcePanel extends StatelessWidget {
     required this.onClose,
   });
 
+  final AppStrings strings;
   final TextEditingController controller;
   final bool loading;
   final String? signedInEmail;
@@ -902,35 +1090,45 @@ class _SourcePanel extends StatelessWidget {
         children: [
           Row(
             children: [
-              const Expanded(
+              Expanded(
                 child: Text(
-                  'Google Sheet Source',
-                  style: TextStyle(fontWeight: FontWeight.w700),
+                  strings.googleSheetSource,
+                  style: const TextStyle(fontWeight: FontWeight.w700),
                 ),
               ),
               if (canClose)
                 IconButton(
                   onPressed: onClose,
                   icon: const Icon(Icons.close_rounded),
-                  tooltip: 'Collapse source',
+                  iconSize: 26,
+                  tooltip: strings.collapseSource,
                 ),
             ],
           ),
           if (signedInEmail != null) ...[
             const SizedBox(height: 4),
             Text(
-              'Signed in as $signedInEmail',
+              '${strings.signedInAs} $signedInEmail',
               style: TextStyle(color: Colors.grey.shade700),
             ),
           ],
+          const SizedBox(height: 6),
+          Text(
+            strings.sourceDirections,
+            style: TextStyle(
+              color: Colors.grey.shade700,
+              fontSize: 12.5,
+              height: 1.2,
+            ),
+          ),
           const SizedBox(height: 10),
           TextField(
             controller: controller,
             enabled: !loading,
-            decoration: const InputDecoration(
-              hintText: 'Paste Google Sheets share link or spreadsheet ID',
-              prefixIcon: Icon(Icons.link_rounded),
-              border: OutlineInputBorder(),
+            decoration: InputDecoration(
+              hintText: strings.pasteLinkHint,
+              prefixIcon: const Icon(Icons.link_rounded),
+              border: const OutlineInputBorder(),
             ),
           ),
           const SizedBox(height: 10),
@@ -939,16 +1137,40 @@ class _SourcePanel extends StatelessWidget {
               Expanded(
                 child: FilledButton.icon(
                   onPressed: loading ? null : onLoadPublic,
-                  icon: const Icon(Icons.public_rounded),
-                  label: const Text('Install shared set'),
+                  icon: const Icon(Icons.public_rounded, size: 24),
+                  style: FilledButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 14,
+                    ),
+                  ),
+                  label: Text(
+                    strings.installSharedSet,
+                    style: const TextStyle(
+                      height: 1.0,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
                 ),
               ),
               const SizedBox(width: 10),
               Expanded(
                 child: OutlinedButton.icon(
                   onPressed: loading ? null : onLoadPrivate,
-                  icon: const Icon(Icons.lock_open_rounded),
-                  label: const Text('Authorize & install'),
+                  icon: const Icon(Icons.lock_open_rounded, size: 24),
+                  style: OutlinedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 14,
+                    ),
+                  ),
+                  label: Text(
+                    strings.authorizeAndInstall,
+                    style: const TextStyle(
+                      height: 1.0,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
                 ),
               ),
             ],
@@ -961,6 +1183,7 @@ class _SourcePanel extends StatelessWidget {
 
 class _AnswerActions extends StatelessWidget {
   const _AnswerActions({
+    required this.strings,
     required this.enabled,
     required this.onReveal,
     required this.showAnswer,
@@ -968,6 +1191,7 @@ class _AnswerActions extends StatelessWidget {
     required this.onRight,
   });
 
+  final AppStrings strings;
   final bool enabled;
   final VoidCallback onReveal;
   final bool showAnswer;
@@ -976,47 +1200,80 @@ class _AnswerActions extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Row(
+    final revealButton = OutlinedButton.icon(
+      onPressed: enabled ? onReveal : null,
+      icon: Icon(
+        showAnswer ? Icons.visibility_off_rounded : Icons.visibility_rounded,
+        size: 26,
+      ),
+      style: OutlinedButton.styleFrom(minimumSize: const Size.fromHeight(56)),
+      label: FittedBox(
+        fit: BoxFit.scaleDown,
+        child: Text(
+          showAnswer ? strings.hide : strings.reveal,
+          maxLines: 1,
+          style: const TextStyle(
+            fontSize: 16,
+            fontWeight: FontWeight.w600,
+            height: 1.0,
+          ),
+        ),
+      ),
+    );
+
+    final canScore = enabled && showAnswer;
+
+    final wrongButton = FilledButton(
+      onPressed: canScore ? onWrong : null,
+      style: FilledButton.styleFrom(
+        backgroundColor: const Color(0xFFE76F51),
+        minimumSize: const Size.fromHeight(70),
+      ),
+      child: FittedBox(
+        fit: BoxFit.scaleDown,
+        child: Text(
+          strings.missed,
+          maxLines: 1,
+          style: const TextStyle(
+            fontSize: 20,
+            fontWeight: FontWeight.w700,
+            height: 1.0,
+          ),
+        ),
+      ),
+    );
+
+    final rightButton = FilledButton(
+      onPressed: canScore ? onRight : null,
+      style: FilledButton.styleFrom(
+        backgroundColor: const Color(0xFF2A9D8F),
+        minimumSize: const Size.fromHeight(70),
+      ),
+      child: FittedBox(
+        fit: BoxFit.scaleDown,
+        child: Text(
+          strings.correct,
+          maxLines: 1,
+          style: const TextStyle(
+            fontSize: 20,
+            fontWeight: FontWeight.w700,
+            height: 1.0,
+          ),
+        ),
+      ),
+    );
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
       children: [
-        Expanded(
-          child: FilledButton(
-            onPressed: enabled ? onWrong : null,
-            style: FilledButton.styleFrom(
-              backgroundColor: const Color(0xFFE76F51),
-              minimumSize: const Size.fromHeight(62),
-            ),
-            child: const Text('Missed', style: TextStyle(fontSize: 18)),
-          ),
-        ),
-        const SizedBox(width: 10),
-        Expanded(
-          child: OutlinedButton.icon(
-            onPressed: enabled ? onReveal : null,
-            icon: Icon(
-              showAnswer
-                  ? Icons.visibility_off_rounded
-                  : Icons.visibility_rounded,
-              size: 28,
-            ),
-            style: OutlinedButton.styleFrom(
-              minimumSize: const Size.fromHeight(62),
-            ),
-            label: Text(
-              showAnswer ? 'Hide' : 'Reveal',
-              style: const TextStyle(fontSize: 17),
-            ),
-          ),
-        ),
-        const SizedBox(width: 10),
-        Expanded(
-          child: FilledButton(
-            onPressed: enabled ? onRight : null,
-            style: FilledButton.styleFrom(
-              backgroundColor: const Color(0xFF2A9D8F),
-              minimumSize: const Size.fromHeight(62),
-            ),
-            child: const Text('Correct', style: TextStyle(fontSize: 18)),
-          ),
+        SizedBox(width: double.infinity, child: revealButton),
+        const SizedBox(height: 10),
+        Row(
+          children: [
+            Expanded(child: wrongButton),
+            const SizedBox(width: 10),
+            Expanded(child: rightButton),
+          ],
         ),
       ],
     );
@@ -1065,6 +1322,7 @@ class _FlashCardView extends StatelessWidget {
           Expanded(
             child: Center(
               child: SingleChildScrollView(
+                physics: const ClampingScrollPhysics(),
                 child: Text(
                   text,
                   textAlign: TextAlign.center,
@@ -1140,29 +1398,29 @@ class _InfoCard extends StatelessWidget {
 }
 
 class AboutPage extends StatelessWidget {
-  const AboutPage({super.key});
+  const AboutPage({super.key, required this.strings});
+
+  final AppStrings strings;
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('About')),
+      appBar: AppBar(title: Text(strings.about)),
       body: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text(
-              'Flash Sheets',
+            Text(
+              strings.appTitle,
               style: TextStyle(fontSize: 24, fontWeight: FontWeight.w700),
             ),
             const SizedBox(height: 8),
-            const Text(
-              'A simple flash-card app for Google Sheets powered study sessions.',
-            ),
+            Text(strings.aboutDescription),
             const SizedBox(height: 16),
-            const Text(
-              'Website',
-              style: TextStyle(fontWeight: FontWeight.w700),
+            Text(
+              strings.website,
+              style: const TextStyle(fontWeight: FontWeight.w700),
             ),
             const SizedBox(height: 4),
             const SelectableText('https://hozt.com'),
@@ -1171,12 +1429,12 @@ class AboutPage extends StatelessWidget {
               onPressed: () {
                 showLicensePage(
                   context: context,
-                  applicationName: 'Flash Sheets',
+                  applicationName: strings.appTitle,
                   applicationVersion: '1.0.0',
                 );
               },
               icon: const Icon(Icons.article_outlined),
-              label: const Text('View licenses'),
+              label: Text(strings.viewLicenses),
             ),
           ],
         ),
@@ -1222,6 +1480,111 @@ class _StatChip extends StatelessWidget {
   }
 }
 
+enum AppLanguage { english, spanish }
+
+extension on AppLanguage {
+  String get code => this == AppLanguage.english ? 'en' : 'es';
+}
+
+AppLanguage appLanguageFromCode(String code) {
+  if (code.toLowerCase().startsWith('es')) return AppLanguage.spanish;
+  return AppLanguage.english;
+}
+
+class AppStrings {
+  const AppStrings(this.language);
+
+  final AppLanguage language;
+
+  bool get _isSpanish => language == AppLanguage.spanish;
+
+  String get appTitle => 'Flashcard Sheets';
+  String get languageLabel => _isSpanish ? 'Idioma' : 'Language';
+  String get english => _isSpanish ? 'Ingles' : 'English';
+  String get spanish => _isSpanish ? 'Espanol' : 'Spanish';
+  String get about => _isSpanish ? 'Acerca de' : 'About';
+  String get options => _isSpanish ? 'Opciones' : 'Options';
+  String get signOut => _isSpanish ? 'Cerrar sesion' : 'Sign out';
+  String get installedSets =>
+      _isSpanish ? 'Conjuntos instalados' : 'Installed sets';
+  String get addNewSet => _isSpanish ? 'Agregar conjunto' : 'Add new set';
+  String get deleteSelectedSet =>
+      _isSpanish ? 'Eliminar conjunto seleccionado' : 'Delete selected set';
+  String get right => _isSpanish ? 'Bien' : 'Right';
+  String get wrong => _isSpanish ? 'Mal' : 'Wrong';
+  String get refresh => _isSpanish ? 'Actualizar' : 'Refresh';
+  String get randomize => _isSpanish ? 'Aleatorio' : 'Randomize';
+  String get resetStats =>
+      _isSpanish ? 'Reiniciar estadisticas' : 'Reset stats';
+  String get reviewMissedOnly =>
+      _isSpanish ? 'Repasar solo falladas' : 'Review missed only';
+  String get reverseCards => _isSpanish ? 'Invertir tarjetas' : 'Reverse cards';
+  String get clearMissedRecords =>
+      _isSpanish ? 'Limpiar falladas' : 'Clear missed records';
+  String get noMissedCards =>
+      _isSpanish ? 'No hay tarjetas falladas' : 'No missed cards';
+  String get noMissedCardsBody => _isSpanish
+      ? 'Ya estas al dia. Desactiva "Repasar solo falladas" para estudiar todo.'
+      : 'You are caught up. Turn off "Review missed only" to study all.';
+  String get studyAllCards => _isSpanish ? 'Estudiar todas' : 'Study all cards';
+  String get loadYourSheet => _isSpanish ? 'Carga tu hoja' : 'Load Your Sheet';
+  String get loadYourSheetBody => _isSpanish
+      ? 'Usa un enlace de Google Sheets con dos columnas:\nA = pregunta, B = respuesta.\n\nPuedes instalar varios conjuntos y cambiar entre ellos.'
+      : 'Use a Google Sheets share link with two columns:\nA = question, B = answer.\n\nYou can install multiple sets and switch between them.';
+  String get sessionComplete =>
+      _isSpanish ? 'Sesion completada' : 'Session complete';
+  String get restartSession =>
+      _isSpanish ? 'Reiniciar sesion' : 'Restart session';
+  String get startStudying =>
+      _isSpanish ? 'Comenzar a estudiar' : 'Start Studying';
+  String get backToCards => _isSpanish ? 'Volver a tarjetas' : 'Back to cards';
+  String get question => _isSpanish ? 'Pregunta' : 'Question';
+  String get answer => _isSpanish ? 'Respuesta' : 'Answer';
+  String get googleSheetSource =>
+      _isSpanish ? 'Fuente de Google Sheet' : 'Google Sheet Source';
+  String get signedInAs => _isSpanish ? 'Sesion iniciada como' : 'Signed in as';
+  String get pasteLinkHint => _isSpanish
+      ? 'Pega enlace de Google Sheets o ID'
+      : 'Paste Google Sheets share link or spreadsheet ID';
+  String get installSharedSet =>
+      _isSpanish ? 'Cargar compartido' : 'Load Shared';
+  String get authorizeAndInstall =>
+      _isSpanish ? 'Cargar autorizado' : 'Load Authorize';
+  String get sourceDirections => _isSpanish
+      ? 'Pega un enlace/ID de Google Sheets con 2 columnas: A = pregunta, B = respuesta. Usa "Cargar compartido" para hojas publicas o "Cargar autorizado" para privadas.'
+      : 'Paste a Google Sheets link/ID with 2 columns: A = question, B = answer. Use "Load Shared" for public sheets or "Load Authorize" for private sheets.';
+  String get collapseSource =>
+      _isSpanish ? 'Ocultar fuente' : 'Collapse source';
+  String get missed => _isSpanish ? 'Fallada' : 'Missed';
+  String get correct => _isSpanish ? 'Correcta' : 'Correct';
+  String get hide => _isSpanish ? 'Ocultar' : 'Hide';
+  String get reveal => _isSpanish ? 'Mostrar' : 'Reveal';
+  String get aboutDescription => _isSpanish
+      ? 'Una app simple de tarjetas de estudio para sesiones con Google Sheets.'
+      : 'A simple flash-card app for Google Sheets powered study sessions.';
+  String get website => _isSpanish ? 'Sitio web' : 'Website';
+  String get viewLicenses => _isSpanish ? 'Ver licencias' : 'View licenses';
+  String get pasteLinkFirst => _isSpanish
+      ? 'Primero pega un enlace de Google Sheets.'
+      : 'Paste a Google Sheets share link first.';
+  String get sheet => _isSpanish ? 'Hoja' : 'Sheet';
+  String get noCardsFound => _isSpanish
+      ? 'No se encontraron tarjetas. Verifica que las columnas A y B tengan pregunta y respuesta.'
+      : 'No flash cards found. Ensure columns A and B contain question and answer.';
+  String get oauthHeadersFailed => _isSpanish
+      ? 'No fue posible obtener cabeceras de autorizacion de Google. Revisa OAuth.'
+      : 'Unable to get Google auth headers. Check OAuth setup.';
+  String get googleSignInFailed => _isSpanish
+      ? 'Fallo de inicio de sesion de Google'
+      : 'Google sign-in failed';
+  String get loadSheetBeforeRefresh => _isSpanish
+      ? 'Carga una hoja antes de actualizar.'
+      : 'Load a sheet first before refreshing.';
+  String get androidServerClientIdMissing => _isSpanish
+      ? 'Falta configurar serverClientId de Google en Android. Inicia la app con --dart-define=GOOGLE_SERVER_CLIENT_ID=<tu_web_client_id>.apps.googleusercontent.com'
+      : 'Missing Google serverClientId on Android. Start the app with --dart-define=GOOGLE_SERVER_CLIENT_ID=<your_web_client_id>.apps.googleusercontent.com';
+}
+
 enum SheetLoadMode { publicShareLink, authorized }
 
 class InstalledDeck {
@@ -1231,6 +1594,7 @@ class InstalledDeck {
     required this.sourceInput,
     required this.cards,
     required this.missedCounts,
+    required this.correctCounts,
   });
 
   final String name;
@@ -1238,6 +1602,7 @@ class InstalledDeck {
   final String sourceInput;
   final List<FlashCard> cards;
   final Map<String, int> missedCounts;
+  final Map<String, int> correctCounts;
 
   String cardKey(FlashCard card) => cardKeyFor(card);
 
@@ -1251,6 +1616,7 @@ class InstalledDeck {
     String? sourceInput,
     List<FlashCard>? cards,
     Map<String, int>? missedCounts,
+    Map<String, int>? correctCounts,
   }) {
     return InstalledDeck(
       name: name ?? this.name,
@@ -1258,6 +1624,7 @@ class InstalledDeck {
       sourceInput: sourceInput ?? this.sourceInput,
       cards: cards ?? this.cards,
       missedCounts: missedCounts ?? this.missedCounts,
+      correctCounts: correctCounts ?? this.correctCounts,
     );
   }
 
@@ -1267,12 +1634,15 @@ class InstalledDeck {
     'sourceInput': sourceInput,
     'cards': cards.map((card) => card.toJson()).toList(growable: false),
     'missedCounts': missedCounts,
+    'correctCounts': correctCounts,
   };
 
   factory InstalledDeck.fromJson(Map<String, dynamic> json) {
     final rawCards = (json['cards'] as List<dynamic>? ?? <dynamic>[]);
     final rawMissedCounts =
         (json['missedCounts'] as Map<dynamic, dynamic>? ?? const {});
+    final rawCorrectCounts =
+        (json['correctCounts'] as Map<dynamic, dynamic>? ?? const {});
     return InstalledDeck(
       name: (json['name'] ?? 'Sheet').toString(),
       mode: _sheetLoadModeFromName((json['mode'] ?? '').toString()),
@@ -1290,6 +1660,10 @@ class InstalledDeck {
           .whereType<FlashCard>()
           .toList(growable: false),
       missedCounts: rawMissedCounts.map(
+        (key, value) =>
+            MapEntry(key.toString(), int.tryParse(value.toString()) ?? 0),
+      )..removeWhere((_, value) => value <= 0),
+      correctCounts: rawCorrectCounts.map(
         (key, value) =>
             MapEntry(key.toString(), int.tryParse(value.toString()) ?? 0),
       )..removeWhere((_, value) => value <= 0),
